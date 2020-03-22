@@ -39,11 +39,13 @@
 (defn- analyze
   [expr env]
   (let [bindings (atom {})
+        unquotes (atom {})
         core-re  #"^(clojure|java)\."
         re?      #(boolean (re-find %2 %1))
         isop     #(and (seq? %2) (= %1 (first %2)))
         lookup   #(and (symbol? %) (ns-resolve *ns* %))
         hoist!   #(do (swap! bindings assoc %1 %2) %1)
+        unquote! #(do (swap! unquotes assoc %1 %2) %1)
         dot?     (partial isop '.)
         pass1?   (partial isop 'clojure.core/unquote)
         pass2?   (partial isop 'clojure.core/unquote-splicing)
@@ -62,18 +64,21 @@
                 `(~sym ~obj ~@(if seqm? [args] args))))
             (walk! [x]
               (cond (dot?   x) (dot! x)
-                    (pass1? x) (hoist! (gensym) (second x))
+                    (pass1? x) (unquote! (gensym) (second x))
                     (pass2? x) (hoist! (gensym) `(deref ~(second x)))
                     :otherwise (hoist! (symbol (name x)) x)))
             (walk [x] (walk-exprs walk? walk! x))]
-      [(walk expr) @bindings])))
+      [(walk expr) @bindings @unquotes])))
 
 (defmacro cell=
   ([expr]
    `(cell= ~expr nil))
   ([expr setter]
-   (let [[expr binds] (analyze expr &env)]
-     `(formula (fn [~@(keys binds)] ~expr) [~@(vals binds)] ~setter))))
+   (let [[expr binds unquotes] (analyze expr &env)]
+     `(formula (partial (fn [~@(keys unquotes) ~@(keys binds)] ~expr)
+                        ~@(vals unquotes))
+               [~@(vals binds)]
+               ~setter))))
 
 (defmacro defc  [name val]  `(def ~name (cell ~val)))
 (defmacro defc= [name expr & [setter]] `(def ~name (cell= ~expr ~setter)))
@@ -120,8 +125,12 @@
   ([c expr]
    `(cell!= ~c ~expr nil))
   ([c expr setter]
-   (let [[expr binds] (analyze expr &env)]
-     `(formula! ~c (fn [~@(keys binds)] ~expr) [~@(vals binds)] ~setter))))
+   (let [[expr binds unquotes] (analyze expr &env)]
+     `(formula! ~c
+                (partial (fn [~@(keys unquotes) ~@(keys binds)] ~expr)
+                         ~@(vals unquotes))
+                [~@(vals binds)]
+                ~setter))))
 
 (defmacro ^:private defalias
   [old-name new-var]
